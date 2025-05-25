@@ -7,8 +7,8 @@ import (
 
 	cli "github.com/urfave/cli/v2"
 
-	"github.com/sliveryou/goctl-swagger/action"
-	"github.com/sliveryou/goctl-swagger/generate"
+	"github.com/pokitpeng/goctl-swagger/action"
+	"github.com/pokitpeng/goctl-swagger/generate"
 )
 
 var (
