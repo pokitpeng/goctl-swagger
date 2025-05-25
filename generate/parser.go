@@ -667,59 +667,63 @@ func renderStruct(member spec.Member) swaggerParameterObject {
 func renderReplyAsDefinition(d swaggerDefinitionsObject, p []spec.Type, _ refMap) {
 	// record inline struct
 	inlineMap := make(map[string][]string)
+
+	// 创建一个映射，存储所有类型定义
+	allTypes := make(map[string]spec.Type)
+	for _, t := range p {
+		allTypes[t.Name()] = t
+	}
+
+	// 递归收集所有被引用的类型
+	processedTypes := make(map[string]bool)
+	var processType func(typeName string)
+	processType = func(typeName string) {
+		if processedTypes[typeName] {
+			return
+		}
+		processedTypes[typeName] = true
+
+		if t, exists := allTypes[typeName]; exists {
+			if defineStruct, ok := t.(spec.DefineStruct); ok {
+				for _, member := range defineStruct.Members {
+					memberTypeName := member.Type.Name()
+					// 清理类型名称
+					cleanTypeName := strings.Replace(memberTypeName, "[", "", 1)
+					cleanTypeName = strings.Replace(cleanTypeName, "]", "", 1)
+					cleanTypeName = strings.Replace(cleanTypeName, "*", "", 1)
+					cleanTypeName = strings.Replace(cleanTypeName, "{", "", 1)
+					cleanTypeName = strings.Replace(cleanTypeName, "}", "", 1)
+
+					// 如果是数组类型，获取元素类型
+					if strings.HasPrefix(cleanTypeName, "[]") {
+						cleanTypeName = strings.TrimPrefix(cleanTypeName, "[]")
+					}
+
+					// 跳过基础类型和map类型
+					if swaggerMapTypes[cleanTypeName] == reflect.Invalid &&
+						cleanTypeName != "interface" &&
+						!strings.HasPrefix(cleanTypeName, "map") &&
+						cleanTypeName != "" {
+						processType(cleanTypeName)
+					}
+				}
+			}
+		}
+	}
+
+	// 首先处理所有直接类型
 	for _, i2 := range p {
-		var formFields, untaggedFields swaggerSchemaObjectProperties
+		processType(i2.Name())
+	}
 
-		schema := swaggerSchemaObject{
-			schemaCore: schemaCore{
-				Type: "object",
-			},
-			Properties: new(swaggerSchemaObjectProperties),
-		}
-		defineStruct, _ := i2.(spec.DefineStruct)
-
-		schema.Title = defineStruct.Name()
-
-		for _, member := range defineStruct.Members {
-			inlines := collectProperties(schema.Properties, &formFields, &untaggedFields, member)
-			if len(inlines) > 0 {
-				inlineMap[defineStruct.Name()] = inlines
-			}
-			for _, tag := range member.Tags() {
-				if tag.Key != tagKeyForm && tag.Key != tagKeyJson {
-					continue
-				}
-				if len(tag.Options) == 0 {
-					if !contains(schema.Required, tag.Name) && tag.Name != "required" {
-						schema.Required = append(schema.Required, tag.Name)
-					}
-					continue
-				}
-
-				required := true
-				for _, option := range tag.Options {
-					// case strings.HasPrefix(option, defaultOption):
-					// case strings.HasPrefix(option, optionsOption):
-
-					if strings.HasPrefix(option, optionalOption) || strings.HasPrefix(option, omitemptyOption) {
-						required = false
-					}
-				}
-
-				if required && !contains(schema.Required, tag.Name) {
-					schema.Required = append(schema.Required, tag.Name)
-				}
+	// 现在处理所有被发现的类型
+	for typeName := range processedTypes {
+		if t, exists := allTypes[typeName]; exists {
+			if _, alreadyProcessed := d[typeName]; !alreadyProcessed {
+				// 处理这个类型
+				processTypeDefinition(d, t, inlineMap)
 			}
 		}
-		// if there exists any json fields, form fields are ignored (considered to be params in query).
-		if len(*schema.Properties) == 0 && len(formFields) > 0 {
-			*schema.Properties = formFields
-		}
-		if len(untaggedFields) > 0 {
-			*schema.Properties = append(*schema.Properties, untaggedFields...)
-		}
-
-		d[i2.Name()] = schema
 	}
 
 	// inherit properties
@@ -737,6 +741,61 @@ func renderReplyAsDefinition(d swaggerDefinitionsObject, p []spec.Type, _ refMap
 			}
 		}
 	}
+}
+
+func processTypeDefinition(d swaggerDefinitionsObject, i2 spec.Type, inlineMap map[string][]string) {
+	var formFields, untaggedFields swaggerSchemaObjectProperties
+
+	schema := swaggerSchemaObject{
+		schemaCore: schemaCore{
+			Type: "object",
+		},
+		Properties: new(swaggerSchemaObjectProperties),
+	}
+	defineStruct, _ := i2.(spec.DefineStruct)
+
+	schema.Title = defineStruct.Name()
+
+	for _, member := range defineStruct.Members {
+		inlines := collectProperties(schema.Properties, &formFields, &untaggedFields, member)
+		if len(inlines) > 0 {
+			inlineMap[defineStruct.Name()] = inlines
+		}
+		for _, tag := range member.Tags() {
+			if tag.Key != tagKeyForm && tag.Key != tagKeyJson {
+				continue
+			}
+			if len(tag.Options) == 0 {
+				if !contains(schema.Required, tag.Name) && tag.Name != "required" {
+					schema.Required = append(schema.Required, tag.Name)
+				}
+				continue
+			}
+
+			required := true
+			for _, option := range tag.Options {
+				// case strings.HasPrefix(option, defaultOption):
+				// case strings.HasPrefix(option, optionsOption):
+
+				if strings.HasPrefix(option, optionalOption) || strings.HasPrefix(option, omitemptyOption) {
+					required = false
+				}
+			}
+
+			if required && !contains(schema.Required, tag.Name) {
+				schema.Required = append(schema.Required, tag.Name)
+			}
+		}
+	}
+	// if there exists any json fields, form fields are ignored (considered to be params in query).
+	if len(*schema.Properties) == 0 && len(formFields) > 0 {
+		*schema.Properties = formFields
+	}
+	if len(untaggedFields) > 0 {
+		*schema.Properties = append(*schema.Properties, untaggedFields...)
+	}
+
+	d[i2.Name()] = schema
 }
 
 func collectProperties(jsonFields, formFields, untaggedFields *swaggerSchemaObjectProperties, member spec.Member) (inlines []string) {
@@ -814,6 +873,10 @@ func schemaOfField(member spec.Member) swaggerSchemaObject {
 			core = schemaCore{Type: "object"}
 		} else if refTypeName == "mapstringstring" {
 			core = schemaCore{Type: "object"}
+		} else if refTypeName == "mapstringint" {
+			core = schemaCore{Type: "object"}
+		} else if strings.HasPrefix(refTypeName, "map") {
+			core = schemaCore{Type: "object"}
 		} else if strings.HasPrefix(refTypeName, "[]") {
 			core = schemaCore{Type: "array"}
 
@@ -868,6 +931,32 @@ func schemaOfField(member spec.Member) swaggerSchemaObject {
 			ret = swaggerSchemaObject{
 				schemaCore: core,
 				Properties: props,
+			}
+
+			// 处理map类型，添加additionalProperties
+			typeName := member.Type.Name()
+			if strings.HasPrefix(typeName, "map[") {
+				ret.schemaCore.Type = "object"
+
+				// 解析map的值类型
+				if strings.Contains(typeName, "map[string]string") {
+					ret.AdditionalProperties = &swaggerSchemaObject{
+						schemaCore: schemaCore{Type: "string"},
+					}
+				} else if strings.Contains(typeName, "map[string]int") {
+					ret.AdditionalProperties = &swaggerSchemaObject{
+						schemaCore: schemaCore{Type: "integer", Format: "int32"},
+					}
+				} else if strings.Contains(typeName, "map[string]bool") {
+					ret.AdditionalProperties = &swaggerSchemaObject{
+						schemaCore: schemaCore{Type: "boolean", Format: "boolean"},
+					}
+				} else {
+					// 默认处理为string类型
+					ret.AdditionalProperties = &swaggerSchemaObject{
+						schemaCore: schemaCore{Type: "string"},
+					}
+				}
 			}
 		}
 	default:
